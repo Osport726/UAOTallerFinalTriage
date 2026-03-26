@@ -1,0 +1,12 @@
+services:
+  web:
+    image: ${IMAGE_NAME}:${IMAGE_TAG}
+    container_name: soporte_ti_web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      USE_DUMMY_MODEL: ${USE_DUMMY_MODEL:-0}
+      USE_GRPC_BACKEND: ${USE_GRPC_BACKEND:-0}
+      TRANSFORMERS_OFFLINE: "0"
+      HF_DATASETS_OFFLINE: "0"
