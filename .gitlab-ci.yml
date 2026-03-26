@@ -223,5 +223,5 @@ deploy_container:
     name: production
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
-      when: manual
+      when: on_success
 #esperando mas
