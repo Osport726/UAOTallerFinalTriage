@@ -1,0 +1,227 @@
+# =========================================================
+# DEFINICIÓN DE ETAPAS DEL PIPELINE
+# =========================================================
+# Se ejecutan en orden: test → build → deploy
+stages:
+  - test
+  - build
+  - deploy
+
+
+# =========================================================
+# CONTROL DE CUÁNDO SE CREA EL PIPELINE
+# =========================================================
+# Evita pipelines innecesarios y define en qué casos correr
+workflow:
+  rules:
+    # Ejecutar pipeline en Merge Requests
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+    # Ejecutar en rama principal
+    - if: $CI_COMMIT_BRANCH == "main"
+
+    # Ejecutar en rama de desarrollo
+    - if: $CI_COMMIT_BRANCH == "develop"
+
+    # En cualquier otro caso, NO crear pipeline
+    - when: never
+
+
+# =========================================================
+# VARIABLES GLOBALES DEL PIPELINE
+# =========================================================
+variables:
+  # Versión de uv (gestor de entornos Python)
+  UV_VERSION: "0.10.9"
+
+  # Versión de Python usada en CI
+  PYTHON_VERSION: "3.12"
+
+  # Imagen base del contenedor uv
+  BASE_LAYER: "trixie-slim"
+
+  # Configuración de uv (copiar dependencias en lugar de symlink)
+  UV_LINK_MODE: "copy"
+
+  # Carpeta de cache para dependencias
+  UV_CACHE_DIR: ".uv-cache"
+
+  # Nombre de la imagen en Docker Hub
+  IMAGE_NAME: "osport726/devproyectriage"
+
+  # Tag dinámico basado en el commit
+  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+
+  # Usuario del servidor (Droplet)
+  DEPLOY_USER: "root"
+
+  # Ruta donde se desplegará la app en el servidor
+  DEPLOY_PATH: "/opt/soporte_ti"
+
+  # IP del Droplet (puedes mover esto a variables de GitLab si quieres)
+  DEPLOY_HOST: "143.198.49.22"
+
+  # Requerido por docker:dind para TLS interno
+  DOCKER_TLS_CERTDIR: "/certs"
+
+
+# =========================================================
+# CONFIGURACIÓN GLOBAL PARA TODOS LOS JOBS
+# =========================================================
+default:
+  # Permite cancelar jobs viejos si haces push nuevo
+  interruptible: true
+
+
+# =========================================================
+# PLANTILLA BASE PARA JOBS PYTHON (TEST Y LINT)
+# =========================================================
+.uv-job:
+  # Imagen oficial de uv con Python
+  image: ghcr.io/astral-sh/uv:$UV_VERSION-python$PYTHON_VERSION-$BASE_LAYER
+
+  # Cache de dependencias basado en uv.lock
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .uv-cache
+
+  # Antes de ejecutar cualquier script
+  before_script:
+    # Instala make (necesario para tu Makefile)
+    - apt-get update && apt-get install -y --no-install-recommends make
+
+    # Instala dependencias del proyecto
+    - uv sync --locked --group dev
+
+  # Limpieza de cache al final
+  after_script:
+    - uv cache prune --ci
+
+
+# =========================================================
+# JOB: TESTS
+# =========================================================
+tests:
+  extends: .uv-job
+  stage: test
+
+  script:
+    # Ejecuta pruebas unitarias
+    # USE_DUMMY_MODEL evita cargar modelos pesados en CI
+    - USE_DUMMY_MODEL=1 uv run pytest --junitxml=pytest-report.xml
+
+  artifacts:
+    # Guarda resultados incluso si falla
+    when: always
+
+    # Permite ver resultados en GitLab UI
+    reports:
+      junit: pytest-report.xml
+
+
+# =========================================================
+# JOB: LINTING
+# =========================================================
+linting:
+  extends: .uv-job
+  stage: test
+
+  script:
+    # Ejecuta análisis estático de código con ruff
+    - uv run ruff check src tests scripts main.py --exclude src/grpc/stubs
+
+
+# =========================================================
+# JOB: BUILD DE IMAGEN DOCKER
+# =========================================================
+build_image:
+  stage: build
+
+  # Imagen docker CLI
+  image: docker:29.3.0-cli
+
+  # Servicio Docker-in-Docker (para poder hacer build dentro de CI)
+  services:
+    - docker:29.3.0-dind
+
+  # Este job depende de tests y linting
+  needs:
+    - tests
+    - linting
+
+  before_script:
+    # Login seguro a Docker Hub
+    - echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin
+
+  script:
+    # Si existe MODEL_PATH lo usa, si no build normal
+    - |
+      if [ -n "$MODEL_PATH" ]; then
+        docker build --build-arg MODEL_PATH="$MODEL_PATH" -t "$IMAGE_NAME:$IMAGE_TAG" .
+      else
+        docker build -t "$IMAGE_NAME:$IMAGE_TAG" .
+      fi
+
+    # Subir imagen con tag del commit
+    - docker push "$IMAGE_NAME:$IMAGE_TAG"
+
+    # Si es rama main, también publicar latest
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        docker tag "$IMAGE_NAME:$IMAGE_TAG" "$IMAGE_NAME:latest"
+        docker push "$IMAGE_NAME:latest"
+      fi
+
+  rules:
+    # Ejecutar en main
+    - if: $CI_COMMIT_BRANCH == "main"
+
+    # Ejecutar en merge requests
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+
+# =========================================================
+# JOB: DEPLOY EN DIGITALOCEAN
+# =========================================================
+deploy_container:
+  stage: deploy
+  image: alpine:latest
+  needs:
+    - build_image
+  before_script:
+    - echo "SSH_KEY=$SSH_KEY"
+    - ls -l "$SSH_KEY" || true
+    - head -n 3 "$SSH_KEY" || true
+    - apk add --no-cache openssh-client bash
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - cp "$SSH_KEY" ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+  script:
+    - |
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
+        mkdir -p $DEPLOY_PATH &&
+        cat > $DEPLOY_PATH/.env <<EOF
+      IMAGE_NAME=$IMAGE_NAME
+      IMAGE_TAG=latest
+      USE_DUMMY_MODEL=0
+      USE_GRPC_BACKEND=0
+      EOF"
+    - |
+      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null docker-compose.prod.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/docker-compose.prod.yml"
+    - |
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
+        echo '$REGISTRY_PASS' | docker login -u '$REGISTRY_USER' --password-stdin &&
+        docker compose --env-file $DEPLOY_PATH/.env -f $DEPLOY_PATH/docker-compose.prod.yml pull &&
+        docker compose --env-file $DEPLOY_PATH/.env -f $DEPLOY_PATH/docker-compose.prod.yml up -d &&
+        docker image prune -f
+      "
+  environment:
+    name: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+#esperando mas
