@@ -18,7 +18,7 @@ from src.api.routes import report
 from src.api.routes import ui
 
 app = FastAPI(
-    title="Triage de Soporte TI",
+    title="Triage de Soporte TI cambios",
     description="Clasificación de imágenes de incidencias TI mediante DeiT-Tiny",
     version="0.1.0",
 )
