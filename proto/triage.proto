@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package triage.v1;
+
+service TriageService {
+  rpc PredictImage (PredictImageRequest) returns (PredictImageResponse);
+  rpc Health (HealthRequest) returns (HealthResponse);
+}
+
+message PredictImageRequest {
+  bytes image_bytes = 1;
+  string filename = 2;
+  string content_type = 3;
+  int32 top_k_override = 4; // 0 = use default
+}
+
+message Prediction {
+  string category = 1;
+  float score = 2;
+  string routed_to = 3;
+}
+
+message ModelInfo {
+  string model_id = 1;
+  int32 top_k = 2;
+  float min_confidence = 3;
+  bool dummy_mode = 4;
+  bool ready = 5;
+}
+
+message PredictImageResponse {
+  repeated Prediction predictions = 1;
+  ModelInfo model = 2;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  ModelInfo model = 2;
+}

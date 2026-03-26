@@ -1,0 +1,21 @@
+services:
+  grpc:
+    build: .
+    command: ["python", "-m", "src.grpc.server"]
+    environment:
+      # USE_DUMMY_MODEL=1 para desarrollo sin modelo entrenado
+      # USE_DUMMY_MODEL=0 (default) para producción con modelo real
+      USE_DUMMY_MODEL: ${USE_DUMMY_MODEL:-0}
+    ports:
+      - "50051:50051"
+  web:
+    build: .
+    command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      USE_DUMMY_MODEL: ${USE_DUMMY_MODEL:-0}
+      USE_GRPC_BACKEND: ${USE_GRPC_BACKEND:-0}
+      GRPC_TARGET: grpc:50051
+    depends_on:
+      - grpc
+    ports:
+      - "8000:8000"

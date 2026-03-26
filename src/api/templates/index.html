@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+
+{% block title %}Triage de Soporte TI{% endblock %}
+
+{% block content %}
+
+<!-- Upload -->
+<div class="card">
+  <h2>Subir imagen de incidencia</h2>
+
+  <div class="drop-zone" id="drop-zone">
+    <p><strong>Arrastra una imagen aquí</strong></p>
+    <p>o</p>
+    <label class="btn-select" for="file-input">Seleccionar archivo</label>
+    <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" hidden/>
+    <p class="drop-hint">Formatos aceptados: JPG, PNG, WebP</p>
+  </div>
+
+  <div id="preview-area">
+    <img id="preview-img" src="" alt="Vista previa de la imagen"/>
+    <p id="preview-name"></p>
+  </div>
+
+  <button id="analyze-btn" disabled>Analizar imagen</button>
+</div>
+
+<!-- Loading -->
+<div id="loading">
+  <div class="spinner"></div>
+  <p class="loading-text">Analizando imagen...</p>
+</div>
+
+<!-- Error -->
+<div id="error-box"></div>
+
+<!-- Result -->
+<div class="card" id="result">
+  <h2>Resultado del triage</h2>
+
+  <div class="result-row">
+    <span class="label">Categoría</span>
+    <span class="value" id="res-category"></span>
+  </div>
+  <div class="result-row">
+    <span class="label">Equipo sugerido</span>
+    <span class="value" id="res-team"></span>
+  </div>
+  <div class="result-row">
+    <span class="label">Confianza</span>
+    <div class="score-bar">
+      <div class="bar-bg">
+        <div class="bar-fill" id="score-bar-fill"></div>
+      </div>
+      <span class="value" id="res-score"></span>
+    </div>
+  </div>
+  <div class="result-row">
+    <span class="label">Fecha / hora</span>
+    <span class="value" id="res-timestamp"></span>
+  </div>
+
+  <div class="alert-human" id="alert-human">
+    &#9888;&#65039; Confianza baja &mdash; se recomienda revisión humana antes de
+    enrutar.
+  </div>
+
+  <div class="result-actions">
+    <button id="reset-btn">Analizar otra imagen</button>
+    <button id="pdf-btn" class="btn-pdf" disabled>⬇ Descargar reporte PDF</button>
+  </div>
+</div>
+
+<!-- Categories reference -->
+<div class="card">
+  <h2>Categorías de clasificación</h2>
+  <div class="categories-grid">
+    {% for cat in categories %}
+    <div class="cat-chip">
+      <strong>{{ cat.label }}</strong>
+      <span>{{ cat.team }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/triage.js"></script>
+{% endblock %}
