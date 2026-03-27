@@ -175,25 +175,13 @@ build_image:
     - quality
 
   before_script:
-    # Login a Docker Hub o al registry que uses
     - echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin
-
-    # Crear builder buildx si no existe; si ya existe, usarlo
-    - docker buildx create --name triage-builder --use || docker buildx use triage-builder
-
-    # Verificación opcional útil para logs
+    - docker context create triage-context || true
+    - docker buildx create triage-context --name triage-builder --use || docker buildx use triage-builder
     - docker buildx inspect --bootstrap
 
   script:
     - |
-      # ---------------------------------------------------
-      # Construcción con cache remoto:
-      # --cache-from: intenta reutilizar capas previas
-      # --cache-to: publica nuevas capas para próximos builds
-      #
-      # Si MODEL_PATH viene definido en variables CI, se inyecta.
-      # Si no, usa el valor por defecto del Dockerfile.
-      # ---------------------------------------------------
       if [ -n "$MODEL_PATH" ]; then
         docker buildx build \
           --build-arg MODEL_PATH="$MODEL_PATH" \
@@ -214,12 +202,8 @@ build_image:
       fi
 
   rules:
-    # En main siempre construye
-    - if: $CI_COMMIT_BRANCH == "main"
-
-    # En merge request solo construye si cambiaron archivos relevantes
-    # para no gastar tiempo en builds innecesarios
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
         - Dockerfile
         - pyproject.toml
