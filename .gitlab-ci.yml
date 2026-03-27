@@ -15,7 +15,6 @@ variables:
   PYTHON_VERSION: "3.12"
   BASE_LAYER: "trixie-slim"
   UV_LINK_MODE: "copy"
-  UV_CACHE_DIR: ".uv-cache"
 
   IMAGE_NAME: "osport726/devproyectriage"
   IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
@@ -35,12 +34,6 @@ default:
 # ---------------------------------------------------------
 .uv-job:
   image: ghcr.io/astral-sh/uv:$UV_VERSION-python$PYTHON_VERSION-$BASE_LAYER
-  cache:
-    key:
-      files:
-        - uv.lock
-    paths:
-      - .uv-cache
   before_script:
     - uv sync --locked --group dev
 
@@ -58,43 +51,24 @@ tests:
       junit: pytest-report.xml
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes:
-        - src/**/*
-        - tests/**/*
-        - pyproject.toml
-        - uv.lock
-        - main.py
-        - proto/**/*
-        - .gitlab-ci.yml
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "develop"
 
 # ---------------------------------------------------------
-# Lint rápido, sin instalar todas las dependencias del proyecto
+# Lint rápido sin instalar todo el proyecto
 # ---------------------------------------------------------
 linting:
   stage: test
   image: ghcr.io/astral-sh/uv:$UV_VERSION-python$PYTHON_VERSION-$BASE_LAYER
-  cache:
-    key: "ruff-$CI_COMMIT_REF_SLUG"
-    paths:
-      - .uv-cache
   script:
     - uv tool run ruff check src tests scripts main.py --exclude src/grpc/stubs
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes:
-        - src/**/*
-        - tests/**/*
-        - scripts/**/*
-        - main.py
-        - pyproject.toml
-        - .gitlab-ci.yml
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "develop"
 
 # ---------------------------------------------------------
-# Build de imagen Docker
+# Build de imagen Docker solo en main
 # ---------------------------------------------------------
 build_image:
   stage: build
@@ -109,26 +83,14 @@ build_image:
   script:
     - docker build --pull -t "$IMAGE_NAME:$IMAGE_TAG" .
     - docker push "$IMAGE_NAME:$IMAGE_TAG"
-    - |
-      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
-        docker tag "$IMAGE_NAME:$IMAGE_TAG" "$IMAGE_NAME:latest"
-        docker push "$IMAGE_NAME:latest"
-      fi
+    - docker tag "$IMAGE_NAME:$IMAGE_TAG" "$IMAGE_NAME:latest"
+    - docker push "$IMAGE_NAME:latest"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
-      changes:
-        - src/**/*
-        - pyproject.toml
-        - uv.lock
-        - Dockerfile
-        - docker-compose.prod.yml
-        - main.py
-        - proto/**/*
-        - .gitlab-ci.yml
     - when: never
 
 # ---------------------------------------------------------
-# Deploy automático solo desde main
+# Deploy solo en main, después del build
 # ---------------------------------------------------------
 deploy_container:
   stage: deploy
@@ -170,14 +132,5 @@ deploy_container:
     name: production
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
-      changes:
-        - src/**/*
-        - pyproject.toml
-        - uv.lock
-        - Dockerfile
-        - docker-compose.prod.yml
-        - main.py
-        - proto/**/*
-        - .gitlab-ci.yml
       when: on_success
     - when: never

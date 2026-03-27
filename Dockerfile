@@ -1,23 +1,21 @@
 FROM python:3.12-slim
 
-# Instalar uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-# Copiar primero solo archivos de dependencias para aprovechar cache
+# Copiar primero solo archivos de dependencias
 COPY pyproject.toml uv.lock ./
 
 # Instalar dependencias de producción
 RUN uv sync --locked --no-dev
 
-# Copiar luego solo lo necesario de la app
+# Copiar después solo lo necesario de la app
 COPY src ./src
 COPY proto ./proto
 COPY models ./models
 COPY main.py ./
 
-# Variables de entorno
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 ENV TRANSFORMERS_OFFLINE=1
