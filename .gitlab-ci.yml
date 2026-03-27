@@ -268,11 +268,11 @@ deploy_container:
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
         mkdir -p $DEPLOY_PATH &&
         cat > $DEPLOY_PATH/.env <<EOF
-IMAGE_NAME=$IMAGE_NAME
-IMAGE_TAG=latest
-USE_DUMMY_MODEL=0
-USE_GRPC_BACKEND=0
-EOF
+      IMAGE_NAME=$IMAGE_NAME
+      IMAGE_TAG=latest
+      USE_DUMMY_MODEL=0
+      USE_GRPC_BACKEND=0
+      EOF
       "
 
     - |
