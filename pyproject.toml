@@ -16,9 +16,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 requires-python = ">=3.10,<3.13"
+#"torchvision>=0.15",
 dependencies = [
     "torch>=2.0",
-    "torchvision>=0.15",
     "transformers>=4.40",
     "Pillow>=10.0",
     "scikit-learn>=1.3",
