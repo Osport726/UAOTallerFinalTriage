@@ -124,6 +124,7 @@ build_image:
         - docker-compose.prod.yml
         - main.py
         - proto/**/*
+        - .gitlab-ci.yml
     - when: never
 
 # ---------------------------------------------------------
@@ -169,4 +170,14 @@ deploy_container:
     name: production
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - src/**/*
+        - pyproject.toml
+        - uv.lock
+        - Dockerfile
+        - docker-compose.prod.yml
+        - main.py
+        - proto/**/*
+        - .gitlab-ci.yml
       when: on_success
+    - when: never
