@@ -1,7 +1,19 @@
 # =========================================================
-# DEFINICIÓN DE ETAPAS DEL PIPELINE
+# PIPELINE OPTIMIZADO PARA:
+# - FastAPI + uv
+# - pruebas + lint
+# - build Docker con cache remoto
+# - deploy automático en main
+#
+# MEJORAS CLAVE:
+# 1. Se unifican tests + lint en un solo job ("quality")
+#    para no instalar dependencias dos veces.
+# 2. Se mantiene cache de uv basada en uv.lock.
+# 3. Se usa Docker Buildx con cache remota en registry.
+# 4. El build en MR solo corre si cambian archivos relevantes.
+# 5. El deploy corre automáticamente solo en main.
 # =========================================================
-# Se ejecutan en orden: test → build → deploy
+
 stages:
   - test
   - build
@@ -9,218 +21,282 @@ stages:
 
 
 # =========================================================
-# CONTROL DE CUÁNDO SE CREA EL PIPELINE
+# CONTROL DE CREACIÓN DEL PIPELINE
 # =========================================================
-# Evita pipelines innecesarios y define en qué casos correr
+# Crea pipelines en:
+# - merge requests
+# - main
+# - develop
+# Evita pipelines innecesarios en otras ramas/eventos.
+# =========================================================
 workflow:
   rules:
-    # Ejecutar pipeline en Merge Requests
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-
-    # Ejecutar en rama principal
     - if: $CI_COMMIT_BRANCH == "main"
-
-    # Ejecutar en rama de desarrollo
     - if: $CI_COMMIT_BRANCH == "develop"
-
-    # En cualquier otro caso, NO crear pipeline
     - when: never
 
 
 # =========================================================
-# VARIABLES GLOBALES DEL PIPELINE
+# VARIABLES GLOBALES
 # =========================================================
 variables:
-  # Versión de uv (gestor de entornos Python)
+  # Imagen base de uv para los jobs Python
   UV_VERSION: "0.10.9"
-
-  # Versión de Python usada en CI
   PYTHON_VERSION: "3.12"
-
-  # Imagen base del contenedor uv
   BASE_LAYER: "trixie-slim"
 
-  # Configuración de uv (copiar dependencias en lugar de symlink)
+  # uv: copiar dependencias en lugar de symlinks
+  # Esto suele ser más estable en CI y dentro de contenedores.
   UV_LINK_MODE: "copy"
 
-  # Carpeta de cache para dependencias
+  # Carpeta de cache de uv restaurada por GitLab
   UV_CACHE_DIR: ".uv-cache"
 
-  # Nombre de la imagen en Docker Hub
+  # Imagen Docker de tu app
   IMAGE_NAME: "osport726/devproyectriage"
-
-  # Tag dinámico basado en el commit
   IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
 
-  # Usuario del servidor (Droplet)
+  # Referencia de cache remoto para Buildx
+  # Aquí se almacenan capas reutilizables de Docker.
+  BUILDX_CACHE_IMAGE: "osport726/devproyectriage:buildcache"
+
+  # Datos del despliegue
   DEPLOY_USER: "root"
-
-  # Ruta donde se desplegará la app en el servidor
   DEPLOY_PATH: "/opt/soporte_ti"
-
-  # IP del Droplet (puedes mover esto a variables de GitLab si quieres)
   DEPLOY_HOST: "143.198.49.22"
 
-  # Requerido por docker:dind para TLS interno
+  # Variables necesarias para docker:dind
   DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_BUILDKIT: "1"
+
+  # Hace más determinista el comportamiento de docker buildx
+  BUILDKIT_PROGRESS: "plain"
 
 
 # =========================================================
-# CONFIGURACIÓN GLOBAL PARA TODOS LOS JOBS
+# CONFIGURACIÓN GLOBAL
 # =========================================================
 default:
-  # Permite cancelar jobs viejos si haces push nuevo
+  # Si haces un push nuevo, GitLab puede cancelar jobs viejos.
+  # Esto ayuda bastante cuando haces varios commits seguidos.
   interruptible: true
 
 
 # =========================================================
-# PLANTILLA BASE PARA JOBS PYTHON (TEST Y LINT)
+# PLANTILLA BASE PARA JOBS PYTHON
+# =========================================================
+# Se usa en el job de calidad.
+#
+# Importante:
+# - Se mantiene cache basada en uv.lock
+# - fallback_keys permite intentar reutilizar caches previas
+#   cuando la clave exacta aún no existe
+# - make se instala porque tu Makefile puede ser usado
+#   ahora o en el futuro sin romper CI
 # =========================================================
 .uv-job:
-  # Imagen oficial de uv con Python
   image: ghcr.io/astral-sh/uv:$UV_VERSION-python$PYTHON_VERSION-$BASE_LAYER
 
-  # Cache de dependencias basado en uv.lock
   cache:
     key:
       files:
         - uv.lock
+    fallback_keys:
+      - uv-main
+      - uv-default
     paths:
       - .uv-cache
 
-  # Antes de ejecutar cualquier script
   before_script:
-    # Instala make (necesario para tu Makefile)
-    - apt-get update && apt-get install -y --no-install-recommends make
+    # make no viene garantizado en la imagen base
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends make
+    - rm -rf /var/lib/apt/lists/*
 
-    # Instala dependencias del proyecto
+    # Instala dependencias del proyecto y del grupo dev una sola vez
     - uv sync --locked --group dev
 
-  # Limpieza de cache al final
   after_script:
+    # Limpia cache descargado innecesario y evita crecimiento excesivo
     - uv cache prune --ci
 
 
 # =========================================================
-# JOB: TESTS
+# JOB: QUALITY
 # =========================================================
-tests:
+# Antes tenías tests y lint separados.
+# Eso obligaba a hacer apt-get + uv sync dos veces.
+#
+# Ahora ambos corren en un solo job:
+# - menos tiempo total
+# - menos tráfico
+# - menos reinstalación
+#
+# USE_DUMMY_MODEL=1 evita cargar el modelo pesado en CI.
+# =========================================================
+quality:
   extends: .uv-job
   stage: test
 
   script:
-    # Ejecuta pruebas unitarias
-    # USE_DUMMY_MODEL evita cargar modelos pesados en CI
+    # 1) Pruebas unitarias
     - USE_DUMMY_MODEL=1 uv run pytest --junitxml=pytest-report.xml
 
-  artifacts:
-    # Guarda resultados incluso si falla
-    when: always
+    # 2) Linting
+    - uv run ruff check src tests scripts main.py --exclude src/grpc/stubs
 
-    # Permite ver resultados en GitLab UI
+  artifacts:
+    when: always
     reports:
       junit: pytest-report.xml
 
 
 # =========================================================
-# JOB: LINTING
-# =========================================================
-linting:
-  extends: .uv-job
-  stage: test
-
-  script:
-    # Ejecuta análisis estático de código con ruff
-    - uv run ruff check src tests scripts main.py --exclude src/grpc/stubs
-
-
-# =========================================================
 # JOB: BUILD DE IMAGEN DOCKER
+# =========================================================
+# Mejoras respecto a tu versión anterior:
+# - usa buildx en lugar de docker build tradicional
+# - usa cache remoto en registry
+# - reusa capas entre pipelines
+# - publica la imagen directamente con --push
+#
+# Esto acelera mucho builds repetidos, especialmente si el runner
+# no conserva cache local entre ejecuciones.
 # =========================================================
 build_image:
   stage: build
-
-  # Imagen docker CLI
   image: docker:29.3.0-cli
 
-  # Servicio Docker-in-Docker (para poder hacer build dentro de CI)
   services:
     - docker:29.3.0-dind
 
-  # Este job depende de tests y linting
   needs:
-    - tests
-    - linting
+    - quality
 
   before_script:
-    # Login seguro a Docker Hub
+    # Login a Docker Hub o al registry que uses
     - echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin
 
+    # Crear builder buildx si no existe; si ya existe, usarlo
+    - docker buildx create --name triage-builder --use || docker buildx use triage-builder
+
+    # Verificación opcional útil para logs
+    - docker buildx inspect --bootstrap
+
   script:
-    # Si existe MODEL_PATH lo usa, si no build normal
     - |
+      # ---------------------------------------------------
+      # Construcción con cache remoto:
+      # --cache-from: intenta reutilizar capas previas
+      # --cache-to: publica nuevas capas para próximos builds
+      #
+      # Si MODEL_PATH viene definido en variables CI, se inyecta.
+      # Si no, usa el valor por defecto del Dockerfile.
+      # ---------------------------------------------------
       if [ -n "$MODEL_PATH" ]; then
-        docker build --build-arg MODEL_PATH="$MODEL_PATH" -t "$IMAGE_NAME:$IMAGE_TAG" .
+        docker buildx build \
+          --build-arg MODEL_PATH="$MODEL_PATH" \
+          --cache-from type=registry,ref="$BUILDX_CACHE_IMAGE" \
+          --cache-to type=registry,ref="$BUILDX_CACHE_IMAGE",mode=max \
+          --tag "$IMAGE_NAME:$IMAGE_TAG" \
+          $( [ "$CI_COMMIT_BRANCH" = "main" ] && echo "--tag $IMAGE_NAME:latest" ) \
+          --push \
+          .
       else
-        docker build -t "$IMAGE_NAME:$IMAGE_TAG" .
-      fi
-
-    # Subir imagen con tag del commit
-    - docker push "$IMAGE_NAME:$IMAGE_TAG"
-
-    # Si es rama main, también publicar latest
-    - |
-      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
-        docker tag "$IMAGE_NAME:$IMAGE_TAG" "$IMAGE_NAME:latest"
-        docker push "$IMAGE_NAME:latest"
+        docker buildx build \
+          --cache-from type=registry,ref="$BUILDX_CACHE_IMAGE" \
+          --cache-to type=registry,ref="$BUILDX_CACHE_IMAGE",mode=max \
+          --tag "$IMAGE_NAME:$IMAGE_TAG" \
+          $( [ "$CI_COMMIT_BRANCH" = "main" ] && echo "--tag $IMAGE_NAME:latest" ) \
+          --push \
+          .
       fi
 
   rules:
-    # Ejecutar en main
+    # En main siempre construye
     - if: $CI_COMMIT_BRANCH == "main"
 
-    # Ejecutar en merge requests
+    # En merge request solo construye si cambiaron archivos relevantes
+    # para no gastar tiempo en builds innecesarios
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - Dockerfile
+        - pyproject.toml
+        - uv.lock
+        - src/**/*
+        - main.py
+        - proto/**/*
+        - docker-compose*.yml
 
 
 # =========================================================
-# JOB: DEPLOY EN DIGITALOCEAN
+# JOB: DEPLOY A PRODUCCIÓN
+# =========================================================
+# Solo se ejecuta en main y después del build exitoso.
+#
+# Se sube/actualiza:
+# - archivo .env
+# - docker-compose.prod.yml
+# Luego:
+# - login al registry
+# - pull de imagen
+# - up -d
+# - prune de imágenes no usadas
 # =========================================================
 deploy_container:
   stage: deploy
   image: alpine:latest
+
   needs:
     - build_image
+
   before_script:
-    - echo "SSH_KEY=$SSH_KEY"
-    - ls -l "$SSH_KEY" || true
-    - head -n 3 "$SSH_KEY" || true
     - apk add --no-cache openssh-client bash
     - mkdir -p ~/.ssh
     - chmod 700 ~/.ssh
+
+    # SSH_KEY debe ser un "File variable" en GitLab CI/CD
     - cp "$SSH_KEY" ~/.ssh/id_ed25519
     - chmod 600 ~/.ssh/id_ed25519
+
   script:
     - |
+      # ---------------------------------------------------
+      # Crear / actualizar archivo .env remoto
+      # ---------------------------------------------------
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
         mkdir -p $DEPLOY_PATH &&
         cat > $DEPLOY_PATH/.env <<EOF
-      IMAGE_NAME=$IMAGE_NAME
-      IMAGE_TAG=latest
-      USE_DUMMY_MODEL=0
-      USE_GRPC_BACKEND=0
-      EOF"
+IMAGE_NAME=$IMAGE_NAME
+IMAGE_TAG=latest
+USE_DUMMY_MODEL=0
+USE_GRPC_BACKEND=0
+EOF
+      "
+
     - |
-      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null docker-compose.prod.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/docker-compose.prod.yml"
+      # ---------------------------------------------------
+      # Copiar docker-compose de producción al servidor
+      # ---------------------------------------------------
+      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        docker-compose.prod.yml \
+        "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/docker-compose.prod.yml"
+
     - |
+      # ---------------------------------------------------
+      # Login al registry y despliegue
+      # ---------------------------------------------------
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
         echo '$REGISTRY_PASS' | docker login -u '$REGISTRY_USER' --password-stdin &&
         docker compose --env-file $DEPLOY_PATH/.env -f $DEPLOY_PATH/docker-compose.prod.yml pull &&
         docker compose --env-file $DEPLOY_PATH/.env -f $DEPLOY_PATH/docker-compose.prod.yml up -d &&
         docker image prune -f
       "
+
   environment:
     name: production
+
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
       when: on_success
