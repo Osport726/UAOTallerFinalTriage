@@ -138,13 +138,17 @@ deploy_container:
     - apk add --no-cache openssh-client bash
     - mkdir -p ~/.ssh
     - chmod 700 ~/.ssh
-    - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+    - test -f "$SSH_KEY"
+    - cp "$SSH_KEY" ~/.ssh/id_ed25519
     - chmod 600 ~/.ssh/id_ed25519
     - ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null
   script:
     - |
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
-        mkdir -p $DEPLOY_PATH &&
+        mkdir -p $DEPLOY_PATH
+      "
+    - |
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
         cat > $DEPLOY_PATH/.env <<EOF
       IMAGE_NAME=$IMAGE_NAME
       IMAGE_TAG=latest
@@ -161,5 +165,8 @@ deploy_container:
         docker compose --env-file $DEPLOY_PATH/.env -f $DEPLOY_PATH/docker-compose.prod.yml up -d &&
         docker image prune -f
       "
+  environment:
+    name: production
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
+      when: on_success
