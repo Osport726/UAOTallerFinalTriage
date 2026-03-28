@@ -1,8 +1,16 @@
+# Define las etapas globales del pipeline.
+# GitLab intentará respetar este orden: test -> build -> deploy
 stages:
   - test
   - build
   - deploy
 
+# Controla cuándo se crea un pipeline completo.
+# Solo se permite:
+# 1. pipelines lanzados por merge requests
+# 2. commits en main
+# 3. commits en develop
+# Cualquier otro caso se bloquea con "when: never".
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -10,30 +18,58 @@ workflow:
     - if: $CI_COMMIT_BRANCH == "develop"
     - when: never
 
+# Variables globales reutilizables en todos los jobs.
 variables:
+  # Versión de uv usada en los jobs Python.
   UV_VERSION: "0.10.9"
+
+  # Versión de Python para el entorno CI.
   PYTHON_VERSION: "3.12"
+
+  # Variante base de la imagen usada por uv.
   BASE_LAYER: "trixie-slim"
+
+  # Modo de enlace de uv. "copy" evita ciertos problemas
+  # con links simbólicos o hardlinks en CI.
   UV_LINK_MODE: "copy"
 
+  # Nombre del repositorio Docker donde se publicará la imagen.
   IMAGE_NAME: "osport726/devproyectriage"
+
+  # Tag dinámico basado en el SHA corto del commit.
+  # Esto hace que cada build tenga una versión identificable.
   IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
 
+  # Usuario SSH del servidor de despliegue.
   DEPLOY_USER: "root"
+
+  # Ruta remota donde se copiarán archivos y se ejecutará docker compose.
   DEPLOY_PATH: "/opt/soporte_ti"
+
+  # Host/IP del servidor de producción.
   DEPLOY_HOST: "143.198.49.22"
 
+  # Carpeta usada por Docker-in-Docker para certificados TLS.
   DOCKER_TLS_CERTDIR: "/certs"
+
+  # Activa BuildKit para mejorar el proceso de build.
   DOCKER_BUILDKIT: "1"
 
+# Configuración por defecto para todos los jobs.
 default:
+  # Si llega un pipeline más reciente, este job se puede cancelar.
+  # Ayuda a ahorrar recursos del runner.
   interruptible: true
 
 # ---------------------------------------------------------
 # Plantilla base para jobs Python que sí requieren entorno
 # ---------------------------------------------------------
 .uv-job:
+  # Imagen lista para usar uv + Python en la versión definida arriba.
   image: ghcr.io/astral-sh/uv:$UV_VERSION-python$PYTHON_VERSION-$BASE_LAYER
+
+  # Antes de correr el job, sincroniza dependencias del proyecto
+  # respetando el lockfile e incluyendo dependencias de desarrollo.
   before_script:
     - uv sync --locked --group dev
 
@@ -41,76 +77,143 @@ default:
 # Tests
 # ---------------------------------------------------------
 tests:
+  # Hereda configuración de la plantilla .uv-job
   extends: .uv-job
+
+  # Este job pertenece a la fase de testing.
   stage: test
+
   script:
+    # Ejecuta pytest usando un modelo dummy en lugar del real.
+    # Esto hace pruebas más rápidas y menos pesadas.
+    # Además genera un reporte XML en formato JUnit.
     - USE_DUMMY_MODEL=1 uv run pytest --junitxml=pytest-report.xml
+
   artifacts:
+    # Guarda los artefactos aunque las pruebas fallen.
     when: always
     reports:
+      # Le indica a GitLab que este archivo es un reporte JUnit de tests.
       junit: pytest-report.xml
+
   rules:
+    # Corre en merge requests
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Corre en main
     - if: $CI_COMMIT_BRANCH == "main"
+    # Corre en develop
     - if: $CI_COMMIT_BRANCH == "develop"
 
 # ---------------------------------------------------------
 # Lint rápido sin instalar todo el proyecto
 # ---------------------------------------------------------
 linting:
+  # También forma parte de la fase de test
   stage: test
+
+  # Usa la misma imagen base con uv y Python.
   image: ghcr.io/astral-sh/uv:$UV_VERSION-python$PYTHON_VERSION-$BASE_LAYER
+
   script:
+    # Ejecuta Ruff para revisar calidad y estilo del código.
+    # Analiza src, tests, scripts y main.py
+    # Excluye stubs generados automáticamente por gRPC.
     - uv tool run ruff check src tests scripts main.py --exclude src/grpc/stubs
+
   rules:
+    # Corre en merge requests
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Corre en main
     - if: $CI_COMMIT_BRANCH == "main"
+    # Corre en develop
     - if: $CI_COMMIT_BRANCH == "develop"
 
 # ---------------------------------------------------------
 # Build de imagen Docker solo en main
 # ---------------------------------------------------------
 build_image:
+  # Fase de construcción
   stage: build
+
+  # Imagen que contiene el cliente Docker
   image: docker:29.3.0-cli
+
   services:
+    # Servicio Docker-in-Docker para poder hacer docker build/push desde CI
     - docker:29.3.0-dind
+
   needs:
+    # Este job depende de que tests y linting terminen bien.
     - tests
     - linting
+
   before_script:
+    # Inicia sesión en el registry Docker usando variables protegidas.
     - echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin
+
   script:
+    # Construye la imagen desde el Dockerfile del proyecto.
+    # --pull intenta actualizar la imagen base.
     - docker build --pull -t "$IMAGE_NAME:$IMAGE_TAG" .
+
+    # Publica la imagen etiquetada con el SHA del commit.
     - docker push "$IMAGE_NAME:$IMAGE_TAG"
+
+    # Crea también una etiqueta "latest" para facilitar despliegues.
     - docker tag "$IMAGE_NAME:$IMAGE_TAG" "$IMAGE_NAME:latest"
+
+    # Publica la etiqueta latest.
     - docker push "$IMAGE_NAME:latest"
+
   rules:
+    # Solo corre si el commit pertenece a la rama main.
     - if: $CI_COMMIT_BRANCH == "main"
+    # En cualquier otro caso, no se ejecuta.
     - when: never
 
 # ---------------------------------------------------------
 # Deploy solo en main, después del build
 # ---------------------------------------------------------
 deploy_container:
+  # Fase de despliegue
   stage: deploy
+
+  # Imagen ligera para usar SSH y SCP
   image: alpine:latest
+
   needs:
+    # Solo despliega si el build terminó correctamente.
     - build_image
+
   before_script:
+    # Instala cliente SSH y bash
     - apk add --no-cache openssh-client bash
+
+    # Crea la carpeta .ssh con permisos seguros
     - mkdir -p ~/.ssh
     - chmod 700 ~/.ssh
+
+    # Verifica que exista el archivo de clave privada
+    # referenciado por la variable SSH_KEY
     - test -f "$SSH_KEY"
+
+    # Copia la clave privada a la ubicación esperada por ssh
     - cp "$SSH_KEY" ~/.ssh/id_ed25519
     - chmod 600 ~/.ssh/id_ed25519
+
+    # Valida que la clave privada sea correcta
     - ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null
+
   script:
     - |
+      # Crea el directorio de despliegue en el servidor remoto
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
         mkdir -p $DEPLOY_PATH
       "
+
     - |
+      # Genera el archivo .env en el servidor remoto.
+      # Este archivo será usado por docker compose para resolver variables.
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
         cat > $DEPLOY_PATH/.env <<EOF
       IMAGE_NAME=$IMAGE_NAME
@@ -119,18 +222,31 @@ deploy_container:
       USE_GRPC_BACKEND=0
       EOF
       "
+
     - |
+      # Copia el archivo de docker compose de producción al servidor remoto
       scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null docker-compose.prod.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/docker-compose.prod.yml"
+
     - |
+      # En el servidor remoto:
+      # 1. hace login al registry Docker
+      # 2. descarga la imagen más reciente
+      # 3. levanta/actualiza los contenedores
+      # 4. limpia imágenes no usadas
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$DEPLOY_USER@$DEPLOY_HOST" "
         echo '$REGISTRY_PASS' | docker login -u '$REGISTRY_USER' --password-stdin &&
         docker compose --env-file $DEPLOY_PATH/.env -f $DEPLOY_PATH/docker-compose.prod.yml pull &&
         docker compose --env-file $DEPLOY_PATH/.env -f $DEPLOY_PATH/docker-compose.prod.yml up -d &&
         docker image prune -f
       "
+
   environment:
+    # Registra este job como despliegue al entorno de producción
     name: production
+
   rules:
+    # Solo despliega en main y únicamente si el pipeline viene exitoso
     - if: $CI_COMMIT_BRANCH == "main"
       when: on_success
+    # Fuera de ese caso, no corre
     - when: never
